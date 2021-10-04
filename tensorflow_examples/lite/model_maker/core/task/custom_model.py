@@ -69,36 +69,6 @@ class CustomModel(abc.ABC):
   def evaluate(self, data, **kwargs):
     return
 
-  # TODO(b/155949323): Refactor the code for gen_dataset in CustomModel to a
-  # seperated  dataloader.
-  def _get_dataset_fn(self, input_data, global_batch_size, is_training):
-    """Gets a closure to create a dataset."""
-
-    def _dataset_fn(ctx=None):
-      """Returns tf.data.Dataset for question answer retraining."""
-      batch_size = ctx.get_per_replica_batch_size(
-          global_batch_size) if ctx else global_batch_size
-      dataset = input_data.gen_dataset(
-          batch_size,
-          is_training=is_training,
-          # TODO(wangtz): Consider moving `shuffle` to DataLoader.
-          shuffle=self.shuffle,
-          input_pipeline_context=ctx,
-          preprocess=self.preprocess)
-      return dataset
-
-    return _dataset_fn
-
-  def _get_input_fn_and_steps(self, data, batch_size, is_training):
-    """Gets input_fn and steps for training/evaluation."""
-    if data is None:
-      input_fn = None
-      steps = 0
-    else:
-      input_fn = self._get_dataset_fn(data, batch_size, is_training)
-      steps = len(data) // batch_size
-    return input_fn, steps
-
   def _get_default_export_format(self, **kwargs):
     """Gets the default export format."""
     if kwargs.get('with_metadata', True):
@@ -126,7 +96,7 @@ class CustomModel(abc.ABC):
              export_dir,
              tflite_filename='model.tflite',
              label_filename='labels.txt',
-             vocab_filename='vocab',
+             vocab_filename='vocab.txt',
              saved_model_filename='saved_model',
              tfjs_folder_name='tfjs',
              export_format=None,
@@ -148,7 +118,7 @@ class CustomModel(abc.ABC):
         {export_dir}/{tfjs_folder_name}.
       export_format: List of export format that could be saved_model, tflite,
         label, vocab.
-      **kwargs: Other parameters like `quantized` for TFLITE model.
+      **kwargs: Other parameters like `quantized_config` for TFLITE model.
     """
     export_format = self._get_export_format(export_format, **kwargs)
 
@@ -160,7 +130,10 @@ class CustomModel(abc.ABC):
       tflite_filepath = os.path.join(export_dir, tflite_filename)
       export_tflite_kwargs, kwargs = _get_params(self._export_tflite, **kwargs)
       self._export_tflite(tflite_filepath, **export_tflite_kwargs)
+      tf.compat.v1.logging.info(
+          'TensorFlow Lite model exported successfully: %s' % tflite_filepath)
     else:
+      tflite_filepath = None
       with_metadata = False
 
     if ExportFormat.SAVED_MODEL in export_format:
@@ -172,7 +145,7 @@ class CustomModel(abc.ABC):
 
     if ExportFormat.TFJS in export_format:
       tfjs_output_path = os.path.join(export_dir, tfjs_folder_name)
-      self._export_tfjs(tfjs_output_path)
+      self._export_tfjs(tfjs_output_path, tflite_filepath=tflite_filepath)
 
     if ExportFormat.VOCAB in export_format:
       if with_metadata:
@@ -193,6 +166,14 @@ class CustomModel(abc.ABC):
     if kwargs:
       tf.compat.v1.logging.warn('Encountered unknown parameters: ' +
                                 str(kwargs))
+
+  def create_serving_model(self):
+    """Returns the underlining Keras model for serving."""
+    if hasattr(self.model_spec, 'create_serving_model'):
+      model = self.model_spec.create_serving_model(self.model)
+    else:
+      model = self.model
+    return model
 
   def _export_saved_model(self,
                           filepath,
@@ -217,11 +198,9 @@ class CustomModel(abc.ABC):
       options: Optional `tf.saved_model.SaveOptions` object that specifies
         options for saving to SavedModel.
     """
-    if filepath is None:
-      raise ValueError(
-          "SavedModel filepath couldn't be None when exporting to SavedModel.")
-    self.model.save(filepath, overwrite, include_optimizer, save_format,
-                    signatures, options)
+    model = self.create_serving_model()
+    model_util.export_saved_model(model, filepath, overwrite, include_optimizer,
+                                  save_format, signatures, options)
 
   def _export_tflite(self, tflite_filepath, quantization_config=None):
     """Converts the retrained model to tflite format and saves it.
@@ -232,13 +211,16 @@ class CustomModel(abc.ABC):
     """
     model_util.export_tflite(self.model, tflite_filepath, quantization_config)
 
-  def _export_tfjs(self, tfjs_filepath):
+  def _export_tfjs(self, tfjs_filepath, tflite_filepath=None, **kwargs):
     """Converts the retrained model to tflite format.
 
     Args:
       tfjs_filepath: File path to save tflite model.
+      tflite_filepath: File path to existing tflite model.
+      **kwargs: Additional kwargs.
     """
-    model_util.export_tfjs(self.model, tfjs_filepath)
+    model_util.export_tfjs(
+        self.model, tfjs_filepath, tflite_filepath=tflite_filepath, **kwargs)
 
   def _keras_callbacks(self, model_dir):
     """Returns a list of default keras callbacks for `model.fit`."""

@@ -16,6 +16,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import filecmp
 import os
 
 from absl import logging
@@ -24,7 +25,6 @@ from tensorflow_examples.lite.model_maker.core import compat
 from tensorflow_examples.lite.model_maker.core import test_util
 from tensorflow_examples.lite.model_maker.core.data_util import object_detector_dataloader
 from tensorflow_examples.lite.model_maker.core.export_format import ExportFormat
-from tensorflow_examples.lite.model_maker.core.task import configs
 from tensorflow_examples.lite.model_maker.core.task import model_spec
 from tensorflow_examples.lite.model_maker.core.task import object_detector
 
@@ -43,9 +43,10 @@ class ObjectDetectorTest(tf.test.TestCase):
 
     # Train the model.
     task = object_detector.create(data, spec, batch_size=1, epochs=1)
+    self.assertEqual(spec.config.num_classes, 2)
 
     # Evaluate trained model
-    metrics = task.evaluate(data, batch_size=1)
+    metrics = task.evaluate(data)
     self.assertIsInstance(metrics, dict)
     self.assertGreaterEqual(metrics['AP'], 0)
 
@@ -55,30 +56,42 @@ class ObjectDetectorTest(tf.test.TestCase):
     self.assertTrue(os.path.isdir(output_path))
     self.assertNotEqual(len(os.listdir(output_path)), 0)
 
-    # Export the model to TFLite model.
+    # Export the model to the float TFLite model.
     output_path = os.path.join(self.get_temp_dir(), 'float.tflite')
     task.export(
         self.get_temp_dir(),
         tflite_filename='float.tflite',
-        export_format=ExportFormat.TFLITE)
-    self.assertTrue(tf.io.gfile.exists(output_path))
-    self.assertGreater(os.path.getsize(output_path), 0)
+        quantization_config=None,
+        export_format=ExportFormat.TFLITE,
+        with_metadata=True,
+        export_metadata_json_file=True)
+    # Checks the sizes of the float32 TFLite model files in bytes.
+    model_size = 13476379
+    self.assertNear(os.path.getsize(output_path), model_size, 50000)
 
-    # Export the model to quantized TFLite model.
-    # TODO(b/175173304): Skips the test for stable tensorflow 2.4 for now since
-    # it fails. Will revert this change after TF upgrade.
-    if tf.__version__.startswith('2.4'):
-      return
-    output_path = os.path.join(self.get_temp_dir(), 'model_quantized.tflite')
-    config = configs.QuantizationConfig.create_full_integer_quantization(
-        data, is_integer_only=True)
+    json_output_file = os.path.join(self.get_temp_dir(), 'float.json')
+    self.assertTrue(os.path.isfile(json_output_file))
+    self.assertGreater(os.path.getsize(json_output_file), 0)
+    expected_json_file = test_util.get_test_data_path(
+        'efficientdet_lite0_metadata.json')
+    self.assertTrue(filecmp.cmp(json_output_file, expected_json_file))
+
+    # Evaluate the TFLite model.
+    task.evaluate_tflite(output_path, data)
+    self.assertIsInstance(metrics, dict)
+    self.assertGreaterEqual(metrics['AP'], 0)
+
+    # Tests the default quantized model.
+    filename = 'model_quant.tflite'
+    output_path = os.path.join(self.get_temp_dir(), filename)
     task.export(
         self.get_temp_dir(),
-        tflite_filename='model_quantized.tflite',
-        quantization_config=config,
+        tflite_filename=filename,
         export_format=ExportFormat.TFLITE)
+    model_size = 4312187
+    err = model_size * 0.05
     self.assertTrue(os.path.isfile(output_path))
-    self.assertGreater(os.path.getsize(output_path), 0)
+    self.assertNear(os.path.getsize(output_path), model_size, err)
 
 
 if __name__ == '__main__':

@@ -11,86 +11,26 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Recommendation task class."""
+"""APIs to train an on-device recommendation model."""
 import collections
 import tempfile
 
 import numpy as np
 import tensorflow as tf
 
+from tensorflow_examples.lite.model_maker.core.api import mm_export
 from tensorflow_examples.lite.model_maker.core.data_util import data_util
+from tensorflow_examples.lite.model_maker.core.data_util import recommendation_config
 from tensorflow_examples.lite.model_maker.core.export_format import ExportFormat
 from tensorflow_examples.lite.model_maker.core.task import custom_model
-from tensorflow_examples.lite.model_maker.core.task import model_spec as ms
 from tensorflow_examples.lite.model_maker.core.task import model_util
 from tensorflow_examples.lite.model_maker.core.task.model_spec import recommendation_spec
-from tensorflow_examples.lite.model_maker.third_party.recommendation.ml.model import keras_metrics as _metrics
-from tensorflow_examples.lite.model_maker.third_party.recommendation.ml.model import recommendation_model_launcher_keras as _launcher
+from tensorflow_examples.lite.model_maker.third_party.recommendation.ml.model import input_pipeline
+from tensorflow_examples.lite.model_maker.third_party.recommendation.ml.model import metrics as _metrics
+from tensorflow_examples.lite.model_maker.third_party.recommendation.ml.model import recommendation_model_launcher as _launcher
 
 
-def create(train_data,
-           model_spec,
-           model_spec_options=None,
-           model_dir=None,
-           validation_data=None,
-           batch_size=16,
-           steps_per_epoch=10000,
-           epochs=1,
-           learning_rate=0.1,
-           gradient_clip_norm=1.0,
-           shuffle=True,
-           do_train=True,
-           max_history_length=10):
-  """Loads data and train the model for recommendation.
-
-  Args:
-    train_data: Training data.
-    model_spec: Specification for the model.
-    model_spec_options: dict, additional options to creat a model.
-    model_dir: str, path to export model checkpoints and summaries.
-    validation_data: Validation data.
-    batch_size: Batch size for training.
-    steps_per_epoch: int, Number of step per epoch.
-    epochs: int, Number of epochs for training.
-    learning_rate: float, learning rate.
-    gradient_clip_norm: float, clip threshold (<= 0 meaning no clip).
-    shuffle: boolean, whether the training data should be shuffled.
-    do_train: boolean, whether to run training.
-    max_history_length: int, max history length as model input (for inference).
-
-  Returns:
-    object of QuestionAnswer class.
-  """
-  # Create model spec.
-  if model_spec_options is None:
-    model_spec_options = {}
-  model_spec = ms.get(model_spec)(**model_spec_options)
-
-  # Use model_dir or a temp folder to store intermediate checkpoints, etc.
-  if model_dir is None:
-    model_dir = tempfile.mkdtemp()
-
-  recommendation = Recommendation(
-      model_spec,
-      model_dir=model_dir,
-      shuffle=shuffle,
-      max_history_length=max_history_length,
-      learning_rate=learning_rate,
-      gradient_clip_norm=gradient_clip_norm)
-
-  if do_train:
-    tf.compat.v1.logging.info('Training recommendation model...')
-    recommendation.train(
-        train_data,
-        validation_data,
-        batch_size=batch_size,
-        steps_per_epoch=steps_per_epoch,
-        epochs=epochs)
-  else:
-    recommendation.create_model(do_train=False)
-  return recommendation
-
-
+@mm_export('recommendation.Recommendation')
 class Recommendation(custom_model.CustomModel):
   """Recommendation task class."""
 
@@ -105,7 +45,6 @@ class Recommendation(custom_model.CustomModel):
                model_spec,
                model_dir,
                shuffle=True,
-               max_history_length=10,
                learning_rate=0.1,
                gradient_clip_norm=1.0):
     """Init recommendation model.
@@ -114,7 +53,6 @@ class Recommendation(custom_model.CustomModel):
       model_spec: recommendation model spec.
       model_dir: str, path to export model checkpoints and summaries.
       shuffle: boolean, whether the training data should be shuffled.
-      max_history_length: int, max history length as model input for inference.
       learning_rate: float, learning rate.
       gradient_clip_norm: float, clip threshold (<= 0 meaning no clip).
     """
@@ -122,10 +60,17 @@ class Recommendation(custom_model.CustomModel):
       raise ValueError(
           'Expect RecommendationSpec but got model_spec: {}'.format(model_spec))
     self._model_dir = model_dir
-    self._max_history_length = max_history_length
     self._learning_rate = learning_rate
     self._gradient_clip_norm = gradient_clip_norm
     super(Recommendation, self).__init__(model_spec, shuffle=shuffle)
+
+  @property
+  def input_spec(self) -> recommendation_config.InputSpec:
+    return self.model_spec.input_spec
+
+  @property
+  def model_hparams(self) -> recommendation_config.ModelHParams:
+    return self.model_spec.model_hparams
 
   def create_model(self, do_train=True):
     """Creates a model.
@@ -138,7 +83,7 @@ class Recommendation(custom_model.CustomModel):
     """
     self.model = self.model_spec.create_model()
     if do_train:
-      _launcher.compile_model(self.model, self.model_spec.params,
+      _launcher.compile_model(self.model, self.model_hparams.eval_top_k,
                               self._learning_rate, self._gradient_clip_norm)
 
   def train(self,
@@ -198,16 +143,23 @@ class Recommendation(custom_model.CustomModel):
     """Returns a list of default keras callbacks for `model.fit`."""
     return _launcher.get_callbacks(self.model, model_dir)
 
+  def _get_serve_fn(self, keras_model):
+    """Gets serve fn for exporting model."""
+    input_specs = input_pipeline.get_serving_input_specs(self.input_spec)
+    return keras_model.serve.get_concrete_function(**input_specs)
+
   def _export_tflite(self, tflite_filepath):
     """Exports tflite model."""
-    # Export TFLite model with max_history_length.
-    fn = self.model.serve.get_concrete_function(
-        input_context=tf.TensorSpec(
-            shape=[self._max_history_length], dtype=tf.int32, name='context'))
-    converter = tf.lite.TFLiteConverter.from_concrete_functions([fn])
+    serve_fn = self._get_serve_fn(self.model)
+    converter = tf.lite.TFLiteConverter.from_concrete_functions([serve_fn])
     tflite_model = converter.convert()
     with tf.io.gfile.GFile(tflite_filepath, 'wb') as f:
       f.write(tflite_model)
+
+  def _export_saved_model(self, filepath):
+    serve_fn = self._get_serve_fn(self.model)
+    signatures = {tf.saved_model.DEFAULT_SERVING_SIGNATURE_DEF_KEY: serve_fn}
+    tf.saved_model.save(self.model, export_dir=filepath, signatures=signatures)
 
   def evaluate_tflite(self, tflite_filepath, data):
     """Evaluates the tflite model.
@@ -221,33 +173,22 @@ class Recommendation(custom_model.CustomModel):
     Returns:
       Dict of (metric, value), evaluation result of TFLite model.
     """
+    label_name = self.input_spec.label_feature.feature_name
     lite_runner = model_util.get_lite_runner(tflite_filepath, self.model_spec)
     ds = data.gen_dataset(batch_size=1, is_training=False)
 
     max_output_size = data.max_vocab_id + 1  # +1 because 0 is reserved for OOV.
-    eval_top_k = self.model_spec.params['eval_top_k']
+    eval_top_k = self.model_hparams.eval_top_k
     metrics = [
-        _metrics.GlobalRecall(name=f'Global_Recall/Recall_{k}', top_k=k)
+        _metrics.GlobalRecall(top_k=k, name=f'Global_Recall/Recall_{k}')
         for k in eval_top_k
     ]
-    for feature, label in data_util.generate_elements(ds):
-      context = feature['context'][0].astype(np.int32)
-      # x: shape [max_length], padded with PAD_ID
-      if len(context) == self._max_history_length:
-        x = context
-      elif len(context) > self._max_history_length:
-        x = context[:self._max_history_length]
-      else:
-        # Padding.
-        x = np.empty([self._max_history_length], dtype=np.int32)
-        x.fill(self.OOV_ID)
-        x[:len(context)] = context
-
-      # ids, scores: shape [top_k]
+    for feature, y_true in data_util.generate_elements(ds):
+      feature.pop(label_name)
+      x = feature
       ids, scores = lite_runner.run(x)
 
       # y_true: shape [1, 1]
-      y_true = label
       # y_pred: shape [1, max_output_size]; fill only scores with top-k ids.
       y_pred = np.zeros([1, max_output_size])
       for i, score in zip(ids, scores):
@@ -259,3 +200,62 @@ class Recommendation(custom_model.CustomModel):
         m.update_state(y_true, y_pred)
     result = collections.OrderedDict([(m.name, m.result()) for m in metrics])
     return result
+
+  @classmethod
+  def create(cls,
+             train_data,
+             model_spec: recommendation_spec.RecommendationSpec,
+             model_dir: str = None,
+             validation_data=None,
+             batch_size: int = 16,
+             steps_per_epoch: int = 10000,
+             epochs: int = 1,
+             learning_rate: float = 0.1,
+             gradient_clip_norm: float = 1.0,
+             shuffle: bool = True,
+             do_train: bool = True):
+    """Loads data and train the model for recommendation.
+
+    Args:
+      train_data: Training data.
+      model_spec: ModelSpec, Specification for the model.
+      model_dir: str, path to export model checkpoints and summaries.
+      validation_data: Validation data.
+      batch_size: Batch size for training.
+      steps_per_epoch: int, Number of step per epoch.
+      epochs: int, Number of epochs for training.
+      learning_rate: float, learning rate.
+      gradient_clip_norm: float, clip threshold (<= 0 meaning no clip).
+      shuffle: boolean, whether the training data should be shuffled.
+      do_train: boolean, whether to run training.
+
+    Returns:
+      An instance based on Recommendation.
+    """
+    # Use model_dir or a temp folder to store intermediate checkpoints, etc.
+    if model_dir is None:
+      model_dir = tempfile.mkdtemp()
+
+    recommendation = cls(
+        model_spec,
+        model_dir=model_dir,
+        shuffle=shuffle,
+        learning_rate=learning_rate,
+        gradient_clip_norm=gradient_clip_norm)
+
+    if do_train:
+      tf.compat.v1.logging.info('Training recommendation model...')
+      recommendation.train(
+          train_data,
+          validation_data,
+          batch_size=batch_size,
+          steps_per_epoch=steps_per_epoch,
+          epochs=epochs)
+    else:
+      recommendation.create_model(do_train=False)
+    return recommendation
+
+
+# Shortcut function.
+create = Recommendation.create
+mm_export('recommendation.create').export_constant(__name__, 'create')

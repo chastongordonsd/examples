@@ -41,8 +41,8 @@ class DigitClassifier(private val context: Context) {
   private var inputImageHeight: Int = 0 // will be inferred from TF Lite model.
   private var modelInputSize: Int = 0 // will be inferred from TF Lite model.
 
-  fun initialize(): Task<Void> {
-    val task = TaskCompletionSource<Void>()
+  fun initialize(): Task<Void?> {
+    val task = TaskCompletionSource<Void?>()
     executorService.execute {
       try {
         initializeInterpreter()
@@ -61,9 +61,7 @@ class DigitClassifier(private val context: Context) {
     // Load the TF Lite model from asset folder and initialize TF Lite Interpreter with NNAPI enabled.
     val assetManager = context.assets
     val model = loadModelFile(assetManager, "mnist.tflite")
-    val options = Interpreter.Options()
-    options.setUseNNAPI(true)
-    val interpreter = Interpreter(model, options)
+    val interpreter = Interpreter(model)
 
     // TODO: Read the model input shape from model file.
 
@@ -113,7 +111,7 @@ class DigitClassifier(private val context: Context) {
     // Post-processing: find the digit that has the highest probability
     // and return it a human-readable string.
     val result = output[0]
-    val maxIndex = result.indices.maxBy { result[it] } ?: -1
+    val maxIndex = result.indices.maxByOrNull { result[it] } ?: -1
     val resultString =
       "Prediction Result: %d\nConfidence: %2f"
         .format(maxIndex, result[maxIndex])

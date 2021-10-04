@@ -27,8 +27,8 @@ class DigitClassifier(private val context: Context) {
   private var inputImageHeight: Int = 0 // will be inferred from TF Lite model
   private var modelInputSize: Int = 0 // will be inferred from TF Lite model
 
-  fun initialize(): Task<Void> {
-    val task = TaskCompletionSource<Void>()
+  fun initialize(): Task<Void?> {
+    val task = TaskCompletionSource<Void?>()
     executorService.execute {
       try {
         initializeInterpreter()
@@ -134,7 +134,7 @@ class DigitClassifier(private val context: Context) {
   }
 
   private fun getOutputString(output: FloatArray): String {
-    val maxIndex = output.indices.maxBy { output[it] } ?: -1
+    val maxIndex = output.indices.maxByOrNull { output[it] } ?: -1
     return "Prediction Result: %d\nConfidence: %2f".format(maxIndex, output[maxIndex])
   }
 

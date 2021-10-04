@@ -18,6 +18,8 @@ from __future__ import division
 from __future__ import print_function
 
 import collections
+import functools
+import logging
 import os
 import re
 import tempfile
@@ -25,6 +27,8 @@ import tempfile
 import tensorflow as tf
 from tensorflow_examples.lite.model_maker.core import compat
 from tensorflow_examples.lite.model_maker.core import file_util
+from tensorflow_examples.lite.model_maker.core.api import mm_export
+from tensorflow_examples.lite.model_maker.core.task import configs
 from tensorflow_examples.lite.model_maker.core.task import hub_loader
 from tensorflow_examples.lite.model_maker.core.task import model_util
 from tensorflow_examples.lite.model_maker.core.task.model_spec import util
@@ -48,6 +52,7 @@ except:
 # pylint: enable=g-import-not-at-top,bare-except
 
 
+@mm_export('text_classifier.AverageWordVecSpec')
 class AverageWordVecModelSpec(object):
   """A specification of averaging word vector model."""
   PAD = '<PAD>'  # Index: 0
@@ -126,7 +131,10 @@ class AverageWordVecModelSpec(object):
       writer.write(tf_example.SerializeToString())
     writer.close()
 
-  def create_model(self, num_classes, optimizer='rmsprop'):
+  def create_model(self,
+                   num_classes,
+                   optimizer='rmsprop',
+                   with_loss_and_metrics=True):
     """Creates the keras model."""
     # Gets a classifier model.
     model = tf.keras.Sequential([
@@ -138,35 +146,32 @@ class AverageWordVecModelSpec(object):
         tf.keras.layers.Dropout(self.dropout_rate),
         tf.keras.layers.Dense(num_classes, activation='softmax')
     ])
-
-    model.compile(
-        optimizer=optimizer,
-        loss='sparse_categorical_crossentropy',
-        metrics=['accuracy'])
+    if with_loss_and_metrics:
+      # Add loss and metrics in the keras model.
+      model.compile(
+          optimizer=optimizer,
+          loss='sparse_categorical_crossentropy',
+          metrics=['accuracy'])
 
     return model
 
-  def run_classifier(self, train_input_fn, validation_input_fn, epochs,
-                     steps_per_epoch, validation_steps, num_classes, **kwargs):
+  def run_classifier(self, train_ds, validation_ds, epochs, steps_per_epoch,
+                     num_classes, **kwargs):
     """Creates classifier and runs the classifier training."""
     if epochs is None:
       epochs = self.default_training_epochs
 
     model = self.create_model(num_classes)
-    # Gets training and validation dataset
-    train_ds = train_input_fn()
-    validation_ds = None
-    if validation_input_fn is not None:
-      validation_ds = validation_input_fn()
 
     # Trains the models.
-    model.fit(
-        train_ds,
-        epochs=epochs,
-        steps_per_epoch=steps_per_epoch,
-        validation_data=validation_ds,
-        validation_steps=validation_steps,
-        **kwargs)
+    for i in range(epochs):
+      model.fit(
+          train_ds,
+          initial_epoch=i,
+          epochs=i + 1,
+          validation_data=validation_ds,
+          steps_per_epoch=steps_per_epoch,
+          **kwargs)
 
     return model
 
@@ -241,6 +246,10 @@ class AverageWordVecModelSpec(object):
         'wordvec_dim': self.wordvec_dim,
         'lowercase': self.lowercase
     }
+
+  def get_default_quantization_config(self):
+    """Gets the default quantization configuration."""
+    return None
 
 
 def create_classifier_model(bert_config,
@@ -402,6 +411,12 @@ class BertModelSpec(object):
     self.tflite_input_name = tflite_input_name
     self.default_batch_size = default_batch_size
 
+  def get_default_quantization_config(self):
+    """Gets the default quantization configuration."""
+    config = configs.QuantizationConfig.for_dynamic()
+    config.experimental_new_quantizer = True
+    return config
+
   def reorder_input_details(self, tflite_input_details):
     """Reorders the tflite input details to map the order of keras model."""
     for detail in tflite_input_details:
@@ -431,6 +446,7 @@ class BertModelSpec(object):
     tf.compat.v1.logging.info('Saved vocabulary in %s.', vocab_filename)
 
 
+@mm_export('text_classifier.BertClassifierSpec')
 class BertClassifierModelSpec(BertModelSpec):
   """A specification of BERT model for text classification."""
 
@@ -462,7 +478,10 @@ class BertClassifierModelSpec(BertModelSpec):
     classifier_data_lib.file_based_convert_examples_to_features(
         examples, label_names, self.seq_len, self.tokenizer, tfrecord_file)
 
-  def create_model(self, num_classes, optimizer='adam'):
+  def create_model(self,
+                   num_classes,
+                   optimizer='adam',
+                   with_loss_and_metrics=True):
     """Creates the keras model."""
     bert_model, _ = create_classifier_model(
         self.bert_config,
@@ -478,38 +497,56 @@ class BertClassifierModelSpec(BertModelSpec):
       return tf.keras.metrics.SparseCategoricalAccuracy(
           'test_accuracy', dtype=tf.float32)
 
-    bert_model.compile(
-        optimizer=optimizer,
-        loss=tf.keras.losses.SparseCategoricalCrossentropy(),
-        metrics=[metric_fn()])
+    if with_loss_and_metrics:
+      # Add loss and metrics in the keras model.
+      bert_model.compile(
+          optimizer=optimizer,
+          loss=tf.keras.losses.SparseCategoricalCrossentropy(),
+          metrics=[metric_fn()])
 
     return bert_model
 
-  def run_classifier(self, train_input_fn, validation_input_fn, epochs,
-                     steps_per_epoch, validation_steps, num_classes, **kwargs):
-    """Creates classifier and runs the classifier training."""
+  def run_classifier(self, train_ds, validation_ds, epochs, steps_per_epoch,
+                     num_classes, **kwargs):
+    """Creates classifier and runs the classifier training.
 
-    warmup_steps = int(epochs * steps_per_epoch * 0.1)
+    Args:
+      train_ds: tf.data.Dataset, training data to be fed in
+        tf.keras.Model.fit().
+      validation_ds: tf.data.Dataset, validation data to be fed in
+        tf.keras.Model.fit().
+      epochs: Integer, training epochs.
+      steps_per_epoch: Integer or None. Total number of steps (batches of
+        samples) before declaring one epoch finished and starting the next
+        epoch. If `steps_per_epoch` is None, the epoch will run until the input
+        dataset is exhausted.
+      num_classes: Interger, number of classes.
+      **kwargs: Other parameters used in the tf.keras.Model.fit().
+
+    Returns:
+      tf.keras.Model, the keras model that's already trained.
+    """
+    if steps_per_epoch is None:
+      logging.info(
+          'steps_per_epoch is None, use %d as the estimated steps_per_epoch',
+          model_util.ESTIMITED_STEPS_PER_EPOCH)
+      steps_per_epoch = model_util.ESTIMITED_STEPS_PER_EPOCH
+    total_steps = steps_per_epoch * epochs
+    warmup_steps = int(total_steps * 0.1)
     initial_lr = self.learning_rate
 
     with distribute_utils.get_strategy_scope(self.strategy):
-      training_dataset = train_input_fn()
-      evaluation_dataset = None
-      if validation_input_fn is not None:
-        evaluation_dataset = validation_input_fn()
-
-      optimizer = optimization.create_optimizer(initial_lr,
-                                                steps_per_epoch * epochs,
+      optimizer = optimization.create_optimizer(initial_lr, total_steps,
                                                 warmup_steps)
       bert_model = self.create_model(num_classes, optimizer)
 
-    bert_model.fit(
-        x=training_dataset,
-        validation_data=evaluation_dataset,
-        steps_per_epoch=steps_per_epoch,
-        epochs=epochs,
-        validation_steps=validation_steps,
-        **kwargs)
+    for i in range(epochs):
+      bert_model.fit(
+          x=train_ds,
+          initial_epoch=i,
+          epochs=i + 1,
+          validation_data=validation_ds,
+          **kwargs)
 
     return bert_model
 
@@ -644,6 +681,7 @@ def create_qa_model_from_squad(max_seq_length,
       outputs=[start_logits, end_logits])
 
 
+@mm_export('question_answer.BertQaSpec')
 class BertQAModelSpec(BertModelSpec):
   """A specification of BERT model for question answering."""
 
@@ -790,9 +828,29 @@ class BertQAModelSpec(BertModelSpec):
           is_tf2=self.is_tf2)
       return qa_model
 
-  def train(self, train_input_fn, epochs, steps_per_epoch, **kwargs):
-    """Run bert QA training."""
-    warmup_steps = int(epochs * steps_per_epoch * 0.1)
+  def train(self, train_ds, epochs, steps_per_epoch, **kwargs):
+    """Run bert QA training.
+
+    Args:
+      train_ds: tf.data.Dataset, training data to be fed in
+        tf.keras.Model.fit().
+      epochs: Integer, training epochs.
+      steps_per_epoch: Integer or None. Total number of steps (batches of
+        samples) before declaring one epoch finished and starting the next
+        epoch. If `steps_per_epoch` is None, the epoch will run until the input
+        dataset is exhausted.
+      **kwargs: Other parameters used in the tf.keras.Model.fit().
+
+    Returns:
+      tf.keras.Model, the keras model that's already trained.
+    """
+    if steps_per_epoch is None:
+      logging.info(
+          'steps_per_epoch is None, use %d as the estimated steps_per_epoch',
+          model_util.ESTIMITED_STEPS_PER_EPOCH)
+      steps_per_epoch = model_util.ESTIMITED_STEPS_PER_EPOCH
+    total_steps = steps_per_epoch * epochs
+    warmup_steps = int(total_steps * 0.1)
 
     def _loss_fn(positions, logits):
       """Get losss function for QA model."""
@@ -801,10 +859,8 @@ class BertQAModelSpec(BertModelSpec):
       return tf.reduce_mean(loss)
 
     with distribute_utils.get_strategy_scope(self.strategy):
-      training_dataset = train_input_fn()
       bert_model = self.create_model()
-      optimizer = optimization.create_optimizer(self.learning_rate,
-                                                steps_per_epoch * epochs,
+      optimizer = optimization.create_optimizer(self.learning_rate, total_steps,
                                                 warmup_steps)
 
       bert_model.compile(
@@ -815,21 +871,16 @@ class BertQAModelSpec(BertModelSpec):
           'Trainable variables in the model are empty.')
       return bert_model
 
-    bert_model.fit(
-        x=training_dataset,
-        steps_per_epoch=steps_per_epoch,
-        epochs=epochs,
-        **kwargs)
+    bert_model.fit(x=train_ds, epochs=epochs, **kwargs)
 
     return bert_model
 
-  def _predict(self, model, input_fn, num_steps):
+  def _predict(self, model, dataset, num_steps):
     """Predicts the dataset using distribute strategy."""
     # TODO(wangtz): We should probably set default strategy as self.strategy
     # if not specified.
     strategy = self.strategy or tf.distribute.get_strategy()
-    predict_iterator = iter(
-        strategy.distribute_datasets_from_function(input_fn))
+    predict_iterator = iter(strategy.experimental_distribute_dataset(dataset))
 
     @tf.function
     def predict_step(iterator):
@@ -858,9 +909,9 @@ class BertQAModelSpec(BertModelSpec):
                                   len(all_results))
     return all_results
 
-  def predict(self, model, input_fn, num_steps):
-    """Predicts the dataset from `input_fn` for `model`."""
-    return self._predict(model, input_fn, num_steps)
+  def predict(self, model, dataset, num_steps):
+    """Predicts the dataset for `model`."""
+    return self._predict(model, dataset, num_steps)
 
   def reorder_output_details(self, tflite_output_details):
     """Reorders the tflite output details to map the order of keras model."""
@@ -872,14 +923,13 @@ class BertQAModelSpec(BertModelSpec):
         end_logits_detail = detail
     return (start_logits_detail, end_logits_detail)
 
-  def predict_tflite(self, tflite_filepath, input_fn):
-    """Predicts the `input_fn` dataset for TFLite model in `tflite_filepath`."""
-    ds = input_fn()
+  def predict_tflite(self, tflite_filepath, dataset):
+    """Predicts the dataset for TFLite model in `tflite_filepath`."""
     all_results = []
     lite_runner = model_util.LiteRunner(tflite_filepath,
                                         self.reorder_input_details,
                                         self.reorder_output_details)
-    for features, _ in ds:
+    for features, _ in dataset:
       outputs = lite_runner.run(features)
       for unique_id, start_logits, end_logits in zip(features['unique_ids'],
                                                      outputs[0], outputs[1]):
@@ -893,7 +943,7 @@ class BertQAModelSpec(BertModelSpec):
                                     len(all_results))
     return all_results
 
-  def evaluate(self, model, tflite_filepath, input_fn, num_steps, eval_examples,
+  def evaluate(self, model, tflite_filepath, dataset, num_steps, eval_examples,
                eval_features, predict_file, version_2_with_negative,
                max_answer_length, null_score_diff_threshold, verbose_logging,
                output_dir):
@@ -902,7 +952,7 @@ class BertQAModelSpec(BertModelSpec):
     Args:
       model: The keras model to be evaluated.
       tflite_filepath: File path to the TFLite model.
-      input_fn: Function that returns a tf.data.Dataset used for evaluation.
+      dataset: tf.data.Dataset used for evaluation.
       num_steps: Number of steps to evaluate the model.
       eval_examples: List of `squad_lib.SquadExample` for evaluation data.
       eval_features: List of `squad_lib.InputFeatures` for evaluation data.
@@ -932,9 +982,9 @@ class BertQAModelSpec(BertModelSpec):
                        '`tflite_filepath` are None.')
 
     if tflite_filepath is not None:
-      all_results = self.predict_tflite(tflite_filepath, input_fn)
+      all_results = self.predict_tflite(tflite_filepath, dataset)
     else:
-      all_results = self.predict(model, input_fn, num_steps)
+      all_results = self.predict(model, dataset, num_steps)
 
     all_predictions, all_nbest_json, scores_diff_json = (
         squad_lib.postprocess_output(
@@ -963,59 +1013,51 @@ class BertQAModelSpec(BertModelSpec):
     return eval_metrics
 
 
-def average_word_vec_spec(**kwargs):
-  return AverageWordVecModelSpec(**kwargs)
+mobilebert_classifier_spec = functools.partial(
+    BertClassifierModelSpec,
+    uri='https://tfhub.dev/google/mobilebert/uncased_L-24_H-128_B-512_A-4_F-4_OPT/1',
+    is_tf2=False,
+    distribution_strategy='off',
+    name='MobileBert',
+    default_batch_size=48,
+)
+mobilebert_classifier_spec.__doc__ = util.wrap_doc(
+    BertClassifierModelSpec,
+    'Creates MobileBert model spec for the text classification task. See also: `tflite_model_maker.text_classifier.BertClassifierSpec`.'
+)
+mm_export('text_classifier.MobileBertClassifierSpec').export_constant(
+    __name__, 'mobilebert_classifier_spec')
 
+mobilebert_qa_spec = functools.partial(
+    BertQAModelSpec,
+    uri='https://tfhub.dev/google/mobilebert/uncased_L-24_H-128_B-512_A-4_F-4_OPT/1',
+    is_tf2=False,
+    distribution_strategy='off',
+    learning_rate=4e-05,
+    name='MobileBert',
+    default_batch_size=32,
+)
+mobilebert_qa_spec.__doc__ = util.wrap_doc(
+    BertQAModelSpec,
+    'Creates MobileBert model spec for the question answer task. See also: `tflite_model_maker.question_answer.BertQaSpec`.'
+)
+mm_export('question_answer.MobileBertQaSpec').export_constant(
+    __name__, 'mobilebert_qa_spec')
 
-def bert_spec(**kwargs):
-  return BertModelSpec(**kwargs)
-
-
-def bert_classifier_spec(**kwargs):
-  return BertClassifierModelSpec(**kwargs)
-
-
-def bert_qa_spec(**kwargs):
-  return BertQAModelSpec(**kwargs)
-
-
-def mobilebert_classifier_spec(**kwargs):
-  """Model specification for MobileBERT in the text classification task."""
-  args = util.dict_with_default(
-      default_dict=dict(
-          uri='https://tfhub.dev/google/mobilebert/uncased_L-24_H-128_B-512_A-4_F-4_OPT/1',
-          is_tf2=False,
-          distribution_strategy='off',
-          name='MobileBert',
-          default_batch_size=48),
-      **kwargs)
-  return BertClassifierModelSpec(**args)
-
-
-def mobilebert_qa_spec(**kwargs):
-  """Model specification for MobileBERT in the question answer task."""
-  args = util.dict_with_default(
-      default_dict=dict(
-          uri='https://tfhub.dev/google/mobilebert/uncased_L-24_H-128_B-512_A-4_F-4_OPT/1',
-          is_tf2=False,
-          distribution_strategy='off',
-          learning_rate=4e-05,
-          name='MobileBert',
-          default_batch_size=32),
-      **kwargs)
-  return BertQAModelSpec(**args)
-
-
-def mobilebert_qa_squad_spec(**kwargs):
-  """Model specification for MobileBERT that already retrained on SQuAD1.1."""
-  args = util.dict_with_default(
-      default_dict=dict(
-          uri='https://tfhub.dev/google/mobilebert/uncased_L-24_H-128_B-512_A-4_F-4_OPT/squadv1/1',
-          is_tf2=False,
-          distribution_strategy='off',
-          learning_rate=4e-05,
-          name='MobileBert',
-          init_from_squad_model=True,
-          default_batch_size=32),
-      **kwargs)
-  return BertQAModelSpec(**args)
+mobilebert_qa_squad_spec = functools.partial(
+    BertQAModelSpec,
+    uri='https://tfhub.dev/google/mobilebert/uncased_L-24_H-128_B-512_A-4_F-4_OPT/squadv1/1',
+    is_tf2=False,
+    distribution_strategy='off',
+    learning_rate=4e-05,
+    name='MobileBert',
+    init_from_squad_model=True,
+    default_batch_size=32,
+)
+mobilebert_qa_squad_spec.__doc__ = util.wrap_doc(
+    BertQAModelSpec,
+    'Creates MobileBert model spec that\'s already retrained on SQuAD1.1 for '
+    'the question answer task. See also: `tflite_model_maker.question_answer.BertQaSpec`.'
+)
+mm_export('question_answer.MobileBertQaSquadSpec').export_constant(
+    __name__, 'mobilebert_qa_squad_spec')

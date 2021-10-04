@@ -17,33 +17,51 @@ from __future__ import division
 from __future__ import print_function
 
 import os
+import unittest
 
 from absl.testing import parameterized
 import tensorflow.compat.v2 as tf
 
+from tensorflow_examples.lite.model_maker.core.data_util import recommendation_testutil
 from tensorflow_examples.lite.model_maker.core.task import model_spec as ms
+from tensorflow_examples.lite.model_maker.core.task.model_spec import image_spec
+from tensorflow_examples.lite.model_maker.core.task.model_spec import text_spec
 
 MODELS = (
     ms.IMAGE_CLASSIFICATION_MODELS + ms.TEXT_CLASSIFICATION_MODELS +
-    ms.QUESTION_ANSWERING_MODELS + ms.AUDIO_CLASSIFICATION_MODELS +
-    ms.RECOMMENDATION_MODELS)
+    ms.QUESTION_ANSWER_MODELS)
 
 
 class ModelSpecTest(tf.test.TestCase, parameterized.TestCase):
 
   def test_get(self):
     spec = ms.get('mobilenet_v2')
-    self.assertIsInstance(spec, ms.ImageModelSpec)
+    self.assertIsInstance(spec, image_spec.ImageModelSpec)
 
     spec = ms.get('average_word_vec')
-    self.assertIsInstance(spec, ms.AverageWordVecModelSpec)
+    self.assertIsInstance(spec, text_spec.AverageWordVecModelSpec)
 
-    spec = ms.get(ms.mobilenet_v2_spec)
-    self.assertIsInstance(spec, ms.ImageModelSpec)
+    spec = ms.get(image_spec.mobilenet_v2_spec)
+    self.assertIsInstance(spec, image_spec.ImageModelSpec)
 
   @parameterized.parameters(MODELS)
   def test_get_not_none(self, model):
     spec = ms.get(model)
+    self.assertIsNotNone(spec)
+
+  @unittest.skipIf(tf.__version__ < '2.5',
+                   'Audio Classification requires TF 2.5 or later')
+  @parameterized.parameters(ms.AUDIO_CLASSIFICATION_MODELS)
+  def test_get_not_none_audio_models(self, model):
+    spec = ms.get(model)
+    self.assertIsNotNone(spec)
+
+  @parameterized.parameters(ms.RECOMMENDATION_MODELS)
+  def test_get_not_none_recommendation_models(self, model):
+    spec = ms.get(
+        model,
+        input_spec=recommendation_testutil.get_input_spec(),
+        model_hparams=recommendation_testutil.get_model_hparams())
     self.assertIsNotNone(spec)
 
   def test_get_raises(self):

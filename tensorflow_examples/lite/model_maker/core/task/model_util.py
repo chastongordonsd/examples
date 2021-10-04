@@ -17,16 +17,19 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import json
 import os
 import tempfile
 
 import numpy as np
 import tensorflow as tf
+
 from tensorflow_examples.lite.model_maker.core import compat
 from tensorflowjs.converters import converter as tfjs_converter
-
+from tflite_support import metadata as _metadata
 
 DEFAULT_SCALE, DEFAULT_ZERO_POINT = 0, 0
+ESTIMITED_STEPS_PER_EPOCH = 1000
 
 
 def set_batch_size(model, batch_size):
@@ -34,6 +37,33 @@ def set_batch_size(model, batch_size):
   for model_input in model.inputs:
     new_shape = [batch_size] + model_input.shape[1:]
     model_input.set_shape(new_shape)
+
+
+def get_steps_per_epoch(steps_per_epoch=None, batch_size=None, train_data=None):
+  """Gets the estimated training steps per epoch.
+
+  1. If `steps_per_epoch` is set, returns `steps_per_epoch` directly.
+  2. Else if we can get the length of training data successfully, returns
+     `train_data_length // batch_size`.
+  3. Else if it fails to get the length of training data, return None.
+
+  Args:
+    steps_per_epoch: int, training steps per epoch.
+    batch_size: int, batch size.
+    train_data: training data.
+
+  Returns:
+    Estimated training steps per epoch.
+  """
+  if steps_per_epoch is not None:
+    # steps_per_epoch is set by users manually.
+    return steps_per_epoch
+  else:
+    # Gets the steps by the length of the training data.
+    try:
+      return len(train_data) // batch_size
+    except TypeError:
+      return None
 
 
 def _create_temp_dir(convert_from_saved_model):
@@ -51,6 +81,42 @@ class DummyContextManager(object):
 
   def __exit__(self, *args):
     pass
+
+
+def export_labels(filepath, index_to_label):
+  with tf.io.gfile.GFile(filepath, 'w') as f:
+    f.write('\n'.join(index_to_label))
+
+
+def export_saved_model(model,
+                       filepath,
+                       overwrite=True,
+                       include_optimizer=True,
+                       save_format=None,
+                       signatures=None,
+                       options=None):
+  """Saves the model to Tensorflow SavedModel or a single HDF5 file.
+
+  Args:
+    model: Instance of a Keras model.
+    filepath: String, path to SavedModel or H5 file to save the model.
+    overwrite: Whether to silently overwrite any existing file at the target
+      location, or provide the user with a manual prompt.
+    include_optimizer: If True, save optimizer's state together.
+    save_format: Either 'tf' or 'h5', indicating whether to save the model to
+      Tensorflow SavedModel or HDF5. Defaults to 'tf' in TF 2.X, and 'h5' in TF
+      1.X.
+    signatures: Signatures to save with the SavedModel. Applicable to the 'tf'
+      format only. Please see the `signatures` argument in `tf.saved_model.save`
+      for details.
+    options: Optional `tf.saved_model.SaveOptions` object that specifies options
+      for saving to SavedModel.
+  """
+  if filepath is None:
+    raise ValueError(
+        "SavedModel filepath couldn't be None when exporting to SavedModel.")
+  model.save(filepath, overwrite, include_optimizer, save_format, signatures,
+             options)
 
 
 def export_tflite(model,
@@ -88,6 +154,9 @@ def export_tflite(model,
       converter = lite.TFLiteConverter.from_saved_model(save_path)
     else:
       converter = lite.TFLiteConverter.from_keras_model(model)
+      # TODO(b/191205988): Explicitly disable saved model lowering in
+      #                    the conversion.
+      converter.experimental_lower_to_saved_model = False
 
     if quantization_config:
       converter = quantization_config.get_converter_with_quantization(
@@ -100,7 +169,7 @@ def export_tflite(model,
     f.write(tflite_model)
 
 
-def get_lite_runner(tflite_filepath, model_spec):
+def get_lite_runner(tflite_filepath, model_spec=None):
   """Gets `LiteRunner` from file path to TFLite model and `model_spec`."""
   # Gets the functions to handle the input & output indexes if exists.
   reorder_input_details_fn = None
@@ -179,6 +248,14 @@ class LiteRunner(object):
       input_tensors = [input_tensors]
 
     interpreter = self.interpreter
+
+    # Reshape inputs
+    for i, input_detail in enumerate(self.input_details):
+      input_tensor = _get_input_tensor(input_tensors, self.input_details, i)
+      interpreter.resize_tensor_input(input_detail['index'], input_tensor.shape)
+    interpreter.allocate_tensors()
+
+    # Feed input to the interpreter
     for i, input_detail in enumerate(self.input_details):
       input_tensor = _get_input_tensor(input_tensors, self.input_details, i)
       if input_detail['quantization'] != (DEFAULT_SCALE, DEFAULT_ZERO_POINT):
@@ -205,7 +282,10 @@ class LiteRunner(object):
     return output_tensors
 
 
-def export_tfjs(keras_or_saved_model, output_dir, **kwargs):
+def export_tfjs(keras_or_saved_model,
+                output_dir,
+                tflite_filepath=None,
+                **kwargs):
   """Exports saved model to tfjs.
 
   https://www.tensorflow.org/js/guide/conversion?hl=en
@@ -213,18 +293,28 @@ def export_tfjs(keras_or_saved_model, output_dir, **kwargs):
   Args:
     keras_or_saved_model: Keras or saved model.
     output_dir: Output TF.js model dir.
+    tflite_filepath: str, file path to existing tflite model. If set, the
+      metadata is extracted to the TF.js model.
     **kwargs: Other options.
   """
   # For Keras model, creates a saved model first in a temp dir. Otherwise,
   # convert directly.
   is_keras = isinstance(keras_or_saved_model, tf.keras.Model)
   with _create_temp_dir(is_keras) as temp_dir_name:
+    # Export keras model to saved model and then convert to TFJS.
     if is_keras:
       keras_or_saved_model.save(
           temp_dir_name, include_optimizer=False, save_format='tf')
       path = temp_dir_name
     else:
       path = keras_or_saved_model
+
+    # Extract metadata if tflite_filepath is provided.
+    if tflite_filepath:
+      metadata_json = extract_tflite_metadata_json(tflite_filepath)
+      metadata = json.loads(metadata_json)
+      kwargs.update(metadata=metadata)
+
     tfjs_converter.dispatch_keras_saved_model_to_tensorflowjs_conversion(
         path, output_dir, **kwargs)
 
@@ -233,3 +323,16 @@ def load_tfjs_keras_model(model_path):
   """Loads tfjs keras model from path."""
   return tfjs_converter.keras_tfjs_loader.load_keras_model(
       model_path, load_weights=True)
+
+
+def extract_tflite_metadata_json(tflite_filepath):
+  """Extracts metadata from tflite model filepath.
+
+  Args:
+    tflite_filepath: str, path to tflite model file.
+
+  Returns:
+    str: tflite metadata json string.
+  """
+  displayer = _metadata.MetadataDisplayer.with_model_file(tflite_filepath)
+  return displayer.get_metadata_json()

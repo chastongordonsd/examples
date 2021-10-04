@@ -1,11 +1,32 @@
+# Release 0.3
+
+## 0.3.3
+
+*   Minor fix: update tensorflow==2.6 and fix the failure of `evaluate_tflite`
+    for the object detection task.
+
+## 0.3.2
+
+*   Minor fix: Move librosa to an optional library for audio task.
+
+## 0.3.1
+
+*   Polish document showing in
+    https://www.tensorflow.org/lite/api_docs/python/tflite_model_maker.
+*   Add some 0.2.x APIs for backward compatibility.
+
+## 0.3.0
+
+*   Export TFLite Model Maker public APIs, and adapt colabs as demo code.
+*   Add three new tasks: Object Detection, Audio Classification and
+    Recommendation.
+
 # Release 0.2
-
-Refactor the code to be more flexible and extentable without changing API.
-
-Add executable test script for pip package.
 
 ## 0.2.5
 
+*   Refactor the code to be more flexible and extentable without changing API.
+*   Add executable test script for pip package.
 *   Update tensorflow-hub version in requirements.txt to fix incompatible error
     when installing pip package.
 

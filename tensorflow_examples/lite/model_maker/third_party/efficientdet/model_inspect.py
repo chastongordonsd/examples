@@ -86,7 +86,7 @@ class ModelInspector(object):
                tflite_path: Text = None,
                batch_size: int = 1,
                hparams: Text = '',
-               **kwargs):
+               **kwargs):  # pytype: disable=annotation-type-mismatch
     self.model_name = model_name
     self.logdir = logdir
     self.tensorrt = tensorrt
@@ -429,7 +429,7 @@ class ModelInspector(object):
     """Convert to TensorRT."""
     from tensorflow.python.compiler.tensorrt import trt  # pylint: disable=g-direct-tensorflow-import,g-import-not-at-top
     converter = trt.TrtGraphConverter(
-        nodes_blacklist=[t.split(':')[0] for t in fetches],
+        nodes_denylist=[t.split(':')[0] for t in fetches],
         input_graph_def=graph_def,
         precision_mode=self.tensorrt)
     infer_graph = converter.convert()

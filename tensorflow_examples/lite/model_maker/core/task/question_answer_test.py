@@ -29,6 +29,7 @@ from tensorflow_examples.lite.model_maker.core.data_util import text_dataloader
 from tensorflow_examples.lite.model_maker.core.export_format import ExportFormat
 from tensorflow_examples.lite.model_maker.core.task import model_spec as ms
 from tensorflow_examples.lite.model_maker.core.task import question_answer
+from tensorflow_examples.lite.model_maker.core.task.model_spec import text_spec
 
 
 def _get_data(model_spec, version):
@@ -54,13 +55,14 @@ class QuestionAnswerTest(tf.test.TestCase, parameterized.TestCase):
   @test_util.test_in_tf_1
   def test_bert_model_v1_incompatible(self):
     with self.assertRaisesRegex(ValueError, 'Incompatible versions'):
-      _ = ms.BertQAModelSpec(trainable=False)
+      text_spec.BertQAModelSpec(trainable=False)
 
   @test_util.test_in_tf_2
   def test_bert_model(self):
     # Only test squad1.1 since it takes too long time for this.
     version = '1.1'
-    model_spec = ms.BertQAModelSpec(trainable=False, predict_batch_size=1)
+    model_spec = text_spec.BertQAModelSpec(
+        trainable=False, predict_batch_size=1)
     train_data, validation_data = _get_data(model_spec, version)
     model = question_answer.create(
         train_data, model_spec=model_spec, epochs=1, batch_size=1)
@@ -101,7 +103,7 @@ class QuestionAnswerTest(tf.test.TestCase, parameterized.TestCase):
     self.assertGreaterEqual(metric['final_f1'], threshold)
 
   def _test_export_vocab(self, model):
-    vocab_output_file = os.path.join(self.get_temp_dir(), 'vocab')
+    vocab_output_file = os.path.join(self.get_temp_dir(), 'vocab.txt')
     model.export(self.get_temp_dir(), export_format=ExportFormat.VOCAB)
 
     self.assertTrue(os.path.isfile(vocab_output_file))
@@ -114,7 +116,11 @@ class QuestionAnswerTest(tf.test.TestCase, parameterized.TestCase):
                              atol=1e-04,
                              expected_json_file=None):
     tflite_output_file = os.path.join(self.get_temp_dir(), 'model.tflite')
-    model.export(self.get_temp_dir(), export_format=ExportFormat.TFLITE)
+    model.export(
+        self.get_temp_dir(),
+        export_format=ExportFormat.TFLITE,
+        quantization_config=None,
+        export_metadata_json_file=expected_json_file is not None)
 
     self.assertTrue(os.path.isfile(tflite_output_file))
     self.assertGreater(os.path.getsize(tflite_output_file), 0)
@@ -142,11 +148,10 @@ class QuestionAnswerTest(tf.test.TestCase, parameterized.TestCase):
             model.model_spec,
             atol=atol))
 
-    json_output_file = os.path.join(self.get_temp_dir(), 'model.json')
-    self.assertTrue(os.path.isfile(json_output_file))
-    self.assertGreater(os.path.getsize(json_output_file), 0)
-
     if expected_json_file is not None:
+      json_output_file = os.path.join(self.get_temp_dir(), 'model.json')
+      self.assertTrue(os.path.isfile(json_output_file))
+      self.assertGreater(os.path.getsize(json_output_file), 0)
       expected_json_file = test_util.get_test_data_path(expected_json_file)
       self.assertTrue(filecmp.cmp(json_output_file, expected_json_file))
 

@@ -655,6 +655,7 @@ class SegmentationHead(tf.keras.layers.Layer):
                is_training_bn,
                act_type,
                strategy,
+               name='segmentation_head',
                **kwargs):
     """Initialize SegmentationHead.
 
@@ -667,13 +668,14 @@ class SegmentationHead(tf.keras.layers.Layer):
       is_training_bn: True if we train the BatchNorm.
       act_type: String of the activation used.
       strategy: string to specify training strategy for TPU/GPU/CPU.
+      name: string of name.
       **kwargs: other parameters.
     """
-    super().__init__(**kwargs)
+    super().__init__(name=name, **kwargs)
     self.act_type = act_type
     self.con2d_ts = []
     self.con2d_t_bns = []
-    for _ in range(max_level - min_level):
+    for level in range(max_level - min_level):
       self.con2d_ts.append(
           tf.keras.layers.Conv2DTranspose(
               num_filters,
@@ -687,7 +689,7 @@ class SegmentationHead(tf.keras.layers.Layer):
               is_training_bn=is_training_bn,
               data_format=data_format,
               strategy=strategy,
-              name='bn'))
+              name='bn_' + str(level)))
     self.head_transpose = tf.keras.layers.Conv2DTranspose(
         num_classes, 3, strides=2, padding='same')
 
@@ -892,9 +894,24 @@ class EfficientDetNet(tf.keras.Model):
       self._name = super().__init__(name, zero_based)
 
   def call(self, inputs, training):
+    """Returns the network features.
+
+    Args:
+      inputs: Input image tensor, commonly with shape [batch, height, width, 3].
+      training: bool, whether in training model.
+
+    Returns:
+      A list of tensors based on the heads:
+        - If heads is empty, then just return fpn_features;
+        - If heads includes 'object_detection', then return bounding box and
+            class predictions.
+        - If heads includes 'segmentation', then return per-pixel class
+            predictions.
+    """
     config = self.config
     # call backbone network.
     all_feats = self.backbone(inputs, training=training, features_only=True)
+    all_feats[0] = inputs  # replace the [0] logits with inputs.
     feats = all_feats[config.min_level:config.max_level + 1]
 
     # Build additional input features that are not from backbone.
@@ -913,7 +930,7 @@ class EfficientDetNet(tf.keras.Model):
     if 'segmentation' in config.heads:
       seg_outputs = self.seg_head(fpn_feats, training)
       outputs.append(seg_outputs)
-    return tuple(outputs)
+    return tuple(outputs) or fpn_feats
 
 
 class EfficientDetModel(EfficientDetNet):
@@ -956,16 +973,15 @@ class EfficientDetModel(EfficientDetNet):
     if not mode:
       return cls_outputs, box_outputs
 
-    # TODO(tanmingxing): remove this cast once FP16 works postprocessing.
-    cls_outputs = [tf.cast(i, tf.float32) for i in cls_outputs]
-    box_outputs = [tf.cast(i, tf.float32) for i in box_outputs]
-
     if mode == 'global':
       return postprocess.postprocess_global(self.config.as_dict(), cls_outputs,
                                             box_outputs, scales)
     if mode == 'per_class':
       return postprocess.postprocess_per_class(self.config.as_dict(),
                                                cls_outputs, box_outputs, scales)
+    if mode == 'combined':
+      return postprocess.postprocess_combined(self.config.as_dict(),
+                                              cls_outputs, box_outputs, scales)
     if mode == 'tflite':
       if scales is not None:
         # pre_mode should be None for TFLite.

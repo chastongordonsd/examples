@@ -21,6 +21,7 @@ from __future__ import print_function
 import numpy as np
 import tensorflow.compat.v2 as tf
 from tensorflow_examples.lite.model_maker.core.data_util import data_util
+from tensorflow_examples.lite.model_maker.core.data_util import dataloader
 from tensorflow_examples.lite.model_maker.core.export_format import ExportFormat
 from tensorflow_examples.lite.model_maker.core.task import custom_model
 from tensorflow_examples.lite.model_maker.core.task import model_util
@@ -67,7 +68,8 @@ class ClassificationModel(custom_model.CustomModel):
     """Predicts the top-k predictions.
 
     Args:
-      data: Data to be evaluated.
+      data: Data to be evaluated. Either an instance of DataLoader or just raw
+        data entries such TF tensor or numpy array.
       k: Number of top results to be predicted.
       batch_size: Number of samples per evaluation step.
 
@@ -76,8 +78,11 @@ class ClassificationModel(custom_model.CustomModel):
     """
     if k < 0:
       raise ValueError('K should be equal or larger than 0.')
-    ds = data.gen_dataset(
-        batch_size, is_training=False, preprocess=self.preprocess)
+    if isinstance(data, dataloader.DataLoader):
+      ds = data.gen_dataset(
+          batch_size, is_training=False, preprocess=self.preprocess)
+    else:
+      ds = data
 
     predicted_prob = self.model.predict(ds)
     topk_prob, topk_id = tf.math.top_k(predicted_prob, k=k)
@@ -93,16 +98,18 @@ class ClassificationModel(custom_model.CustomModel):
     if label_filepath is None:
       raise ValueError("Label filepath couldn't be None when exporting labels.")
 
-    tf.compat.v1.logging.info('Saving labels in %s.', label_filepath)
+    tf.compat.v1.logging.info('Saving labels in %s', label_filepath)
     with tf.io.gfile.GFile(label_filepath, 'w') as f:
       f.write('\n'.join(self.index_to_label))
 
-  def evaluate_tflite(self, tflite_filepath, data):
+  def evaluate_tflite(self, tflite_filepath, data, postprocess_fn=None):
     """Evaluates the tflite model.
 
     Args:
       tflite_filepath: File path to the TFLite model.
       data: Data to be evaluated.
+      postprocess_fn: Postprocessing function that will be applied to the output
+        of `lite_runner.run` before calculating the probabilities.
 
     Returns:
       The evaluation result of TFLite model - accuracy.
@@ -115,11 +122,14 @@ class ClassificationModel(custom_model.CustomModel):
     lite_runner = model_util.get_lite_runner(tflite_filepath, self.model_spec)
     for i, (feature, label) in enumerate(data_util.generate_elements(ds)):
       log_steps = 1000
-      tf.compat.v1.logging.log_every_n(tf.compat.v1.logging.INFO,
+      tf.compat.v1.logging.log_every_n(tf.compat.v1.logging.DEBUG,
                                        'Processing example: #%d\n%s', log_steps,
                                        i, feature)
 
       probabilities = lite_runner.run(feature)
+
+      if postprocess_fn:
+        probabilities = postprocess_fn(probabilities)
       predictions.append(np.argmax(probabilities))
 
       # Gets the ground-truth labels.

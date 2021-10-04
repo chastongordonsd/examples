@@ -16,11 +16,13 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import csv
 import os
+import shutil
+import unittest
 
 import numpy as np
 from scipy.io import wavfile
-
 import tensorflow.compat.v2 as tf
 from tensorflow_examples.lite.model_maker.core.data_util import audio_dataloader
 from tensorflow_examples.lite.model_maker.core.task.model_spec import audio_spec
@@ -45,6 +47,16 @@ def write_sample(root,
   wavfile.write(os.path.join(root, category, file_name), sample_rate, xs)
 
 
+def write_csv(root, folder, filename, headers, rows):
+  os.makedirs(os.path.join(root, folder), exist_ok=True)
+
+  with open(os.path.join(root, folder, filename), 'w') as f:
+    writer = csv.DictWriter(f, fieldnames=headers)
+    writer.writeheader()
+    for row in rows:
+      writer.writerow(dict(zip(headers, row)))
+
+
 class MockSpec(audio_spec.BaseSpec):
 
   def __init__(self, *args, **kwargs):
@@ -61,7 +73,7 @@ class MockSpec(audio_spec.BaseSpec):
   def target_sample_rate(self):
     return 44100
 
-  def preprocess_ds(self, ds, is_training=False):
+  def preprocess_ds(self, ds, is_training=False, cache_fn=None):
     _ = is_training
 
     @tf.function
@@ -83,6 +95,9 @@ class MockSpec(audio_spec.BaseSpec):
     autotune = tf.data.AUTOTUNE
     ds = ds.filter(_ensure_length)
     ds = ds.map(_split, num_parallel_calls=autotune).unbatch()
+
+    if cache_fn:
+      ds = cache_fn(ds)
     return ds
 
 
@@ -91,36 +106,80 @@ class Base(tf.test.TestCase):
   def _get_folder_path(self, sub_folder_name):
     folder_path = os.path.join(self.get_temp_dir(), sub_folder_name)
     if os.path.exists(folder_path):
-      return
+      shutil.rmtree(folder_path)
     tf.compat.v1.logging.info('Test path: %s', folder_path)
     os.mkdir(folder_path)
     return folder_path
 
 
+@unittest.skipIf(tf.__version__ < '2.5',
+                 'Audio Classification requires TF 2.5 or later')
 class LoadFromESC50Test(Base):
 
-  def test_spec(self):
-    folder_path = self._get_folder_path('test_examples_helper')
+  def test_from_esc50(self):
+    folder_path = self._get_folder_path('test_from_esc50')
+
+    headers = [
+        'filename', 'fold', 'target', 'category', 'esc10', 'src_file', 'take'
+    ]
+    rows = []
+    rows.append(['1-100032-A-0.wav', '1', '0', 'dog', 'True', '100032', 'A'])
+    rows.append([
+        '1-100210-B-36.wav', '2', '36', 'vacuum_cleaner', 'False', '100210', 'B'
+    ])
+    rows.append([
+        '1-100210-A-36.wav', '1', '36', 'vacuum_cleaner', 'False', '100210', 'A'
+    ])
+    write_csv(folder_path, 'meta', 'esc50.csv', headers, rows)
 
     spec = audio_spec.YAMNetSpec()
-    audio_dataloader.DataLoader.from_esc50(spec, folder_path)
+    loader = audio_dataloader.DataLoader.from_esc50(spec, folder_path)
 
-    spec = audio_spec.BrowserFFTSpec()
-    with self.assertRaises(AssertionError):
-      audio_dataloader.DataLoader.from_esc50(spec, folder_path)
+    self.assertEqual(len(loader), 3)
+    self.assertEqual(loader.index_to_label, ['dog', 'vacuum_cleaner'])
+
+    expected_results = {
+        '1-100032-A-0.wav': 0,
+        '1-100210-B-36.wav': 1,
+        '1-100210-A-36.wav': 1,
+    }
+    for full_path, label in loader._dataset:
+      filename = full_path.numpy().decode('utf-8').split('/')[-1]
+      self.assertEqual(expected_results[filename], label)
+
+    # fitlered dataset
+    with self.assertRaisesRegexp(ValueError, 'No audio files found'):
+      loader = audio_dataloader.DataLoader.from_esc50(
+          spec, folder_path, folds=[
+              3,
+          ])
+
+    with self.assertRaisesRegexp(ValueError, 'No audio files found'):
+      loader = audio_dataloader.DataLoader.from_esc50(
+          spec, folder_path, categories=['unknown'])
+
+    loader = audio_dataloader.DataLoader.from_esc50(
+        spec, folder_path, folds=[
+            1,
+        ])
+    self.assertEqual(len(loader), 2)
+
+    loader = audio_dataloader.DataLoader.from_esc50(
+        spec, folder_path, categories=['vacuum_cleaner'])
+    self.assertEqual(len(loader), 2)
+
+    loader = audio_dataloader.DataLoader.from_esc50(
+        spec, folder_path, folds=[
+            1,
+        ], categories=['vacuum_cleaner'])
+    self.assertEqual(len(loader), 1)
+
+    loader = audio_dataloader.DataLoader.from_esc50(
+        spec, folder_path, folds=[1, 2], categories=['vacuum_cleaner'])
+    self.assertEqual(len(loader), 2)
 
 
-class LoadFromFolderTest(Base):
-
-  def test_spec(self):
-    folder_path = self._get_folder_path('test_examples_helper')
-    write_sample(folder_path, 'unknown', '2s.wav', 44100, 2, value=1)
-
-    spec = audio_spec.YAMNetSpec()
-    audio_dataloader.DataLoader.from_folder(spec, folder_path)
-
-    spec = audio_spec.BrowserFFTSpec()
-    audio_dataloader.DataLoader.from_folder(spec, folder_path)
+class ExamplesHelperTest(Base):
 
   def test_examples_helper(self):
     root = self._get_folder_path('test_examples_helper')
@@ -138,18 +197,32 @@ class LoadFromFolderTest(Base):
     def fullpath(name):
       return os.path.join(root, name)
 
-    helper = audio_dataloader.ExamplesHelper(root, is_wav_files)
-    self.assertEqual(helper.sorted_cateogries, ['a', 'b'])
+    helper = audio_dataloader.ExamplesHelper.from_examples_folder(
+        root, is_wav_files)
+    self.assertEqual(helper.index_to_label, ['a', 'b'])
     self.assertEqual(
         helper.examples_and_labels(),
-        ([fullpath('a/1.wav'),
-          fullpath('a/2.wav'),
-          fullpath('b/1.wav')], ['a', 'a', 'b']))
+        ((fullpath('a/1.wav'), fullpath('a/2.wav'), fullpath('b/1.wav')),
+         ('a', 'a', 'b')))
     self.assertEqual(
         helper.examples_and_label_indices(),
-        ([fullpath('a/1.wav'),
-          fullpath('a/2.wav'),
-          fullpath('b/1.wav')], [0, 0, 1]))
+        ((fullpath('a/1.wav'), fullpath('a/2.wav'), fullpath('b/1.wav')),
+         (0, 0, 1)))
+
+
+@unittest.skipIf(tf.__version__ < '2.5',
+                 'Audio Classification requires TF 2.5 or later')
+class LoadFromFolderTest(Base):
+
+  def test_spec(self):
+    folder_path = self._get_folder_path('test_spec')
+    write_sample(folder_path, 'unknown', '2s.wav', 44100, 2, value=1)
+
+    spec = audio_spec.YAMNetSpec()
+    audio_dataloader.DataLoader.from_folder(spec, folder_path)
+
+    spec = audio_spec.BrowserFFTSpec()
+    audio_dataloader.DataLoader.from_folder(spec, folder_path)
 
   def test_no_audio_files_found(self):
     folder_path = self._get_folder_path('test_no_audio_files_found')
@@ -157,6 +230,40 @@ class LoadFromFolderTest(Base):
     with self.assertRaisesRegexp(ValueError, 'No audio files found'):
       spec = MockSpec(model_dir=folder_path)
       audio_dataloader.DataLoader.from_folder(spec, folder_path)
+
+  def test_failed_librosa_imoprt(self):
+    # Temporarily disable resampling.
+    audio_dataloader.ENABLE_RESAMPLE = False
+
+    # Pretend a real import failure.
+    try:
+      import inexistent_package  # pylint: disable=g-import-not-at-top,unused-import
+    except (OSError, ImportError) as e:
+      audio_dataloader.error_import_librosa = e
+
+    try:
+      folder_path = self._get_folder_path('test_failed_librosa_imoprt')
+
+      # No error occured if resampling is not needed.
+      write_sample(folder_path, 'background', '1s.wav', 44100, 1, value=0)
+      spec = MockSpec(model_dir=folder_path)
+      loader = audio_dataloader.DataLoader.from_folder(spec, folder_path)
+      self.assertEqual(len(loader), 1)
+      self.assertEqual(len(list(loader.gen_dataset())), 1)
+
+      # Error occured when resampling is needed.
+      write_sample(folder_path, 'command0', '1.8s.wav', 4410, 1.8, value=5)
+      spec = MockSpec(model_dir=folder_path)
+      loader = audio_dataloader.DataLoader.from_folder(spec, folder_path)
+      self.assertEqual(len(loader), 2)
+      with self.assertRaisesRegexp(tf.errors.UnknownError,
+                                   'sudo apt-get install libsndfile1'):
+        _ = list(loader.gen_dataset())
+
+    finally:
+      # Set it back
+      audio_dataloader.ENABLE_RESAMPLE = True
+      audio_dataloader.error_import_librosa = None
 
   def test_from_folder(self):
     folder_path = self._get_folder_path('test_from_folder')
@@ -172,9 +279,14 @@ class LoadFromFolderTest(Base):
     write_sample(folder_path, 'command0', '1.8s.wav', 4410, 1.8, value=5)
     # Ignored due to wrong file extension
     write_sample(folder_path, 'command0', '1.8s.bak', 4410, 1.8, value=6)
+    # Category not in use.
+    write_sample(folder_path, 'unused_command', '2s.wav', 44410, 1, value=7)
 
     spec = MockSpec(model_dir=folder_path)
-    loader = audio_dataloader.DataLoader.from_folder(spec, folder_path)
+    loader = audio_dataloader.DataLoader.from_folder(
+        spec,
+        folder_path,
+        categories=['background', 'command0', 'command1', 'command2'])
 
     # 6 files with .wav extennsion
     self.assertEqual(len(loader), 6)
@@ -183,6 +295,11 @@ class LoadFromFolderTest(Base):
 
     # 5 valid audio snippets
     self.assertEqual(len(list(loader.gen_dataset())), 5)
+
+    spec = MockSpec(model_dir=folder_path)
+    loader = audio_dataloader.DataLoader.from_folder(
+        spec, folder_path, cache=True)
+    self.assertEqual(len(list(loader.gen_dataset())), 6)
 
 
 if __name__ == '__main__':

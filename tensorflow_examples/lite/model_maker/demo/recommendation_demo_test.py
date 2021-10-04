@@ -26,8 +26,8 @@ import tensorflow as tf
 
 from tensorflow_examples.lite.model_maker.core import test_util
 from tensorflow_examples.lite.model_maker.core.data_util import recommendation_testutil as _rt
-from tensorflow_examples.lite.model_maker.core.data_util.recommendation_dataloader import RecommendationDataLoader
 from tensorflow_examples.lite.model_maker.demo import recommendation_demo
+from tflite_model_maker import recommendation
 
 
 def setup_testdata(instance):
@@ -62,7 +62,7 @@ def patch_data_loader():
     self.vocab = vocab
     self.max_vocab_id = max(self.vocab.keys())
 
-  return mock.patch.object(RecommendationDataLoader, '__init__', mocked_init)
+  return mock.patch.object(recommendation.DataLoader, '__init__', mocked_init)
 
 
 class RecommendationDemoTest(tf.test.TestCase):
@@ -79,11 +79,7 @@ class RecommendationDemoTest(tf.test.TestCase):
     export_dir = os.path.join(self.test_tempdir, 'export')
     tflite_filename = os.path.join(export_dir, 'model.tflite')
     with patch_data_loader():
-      recommendation_demo.run(
-          data_dir,
-          export_dir,
-          spec='recommendation_bow',
-          epochs=1)
+      recommendation_demo.run(data_dir, export_dir, epochs=1)
 
     self.assertTrue(tf.io.gfile.exists(tflite_filename))
     self.assertGreater(os.path.getsize(tflite_filename), 0)

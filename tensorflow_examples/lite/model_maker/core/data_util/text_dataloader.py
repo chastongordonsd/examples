@@ -26,6 +26,7 @@ import tempfile
 from absl import logging
 import tensorflow as tf
 from tensorflow_examples.lite.model_maker.core import file_util
+from tensorflow_examples.lite.model_maker.core.api import mm_export
 from tensorflow_examples.lite.model_maker.core.data_util import dataloader
 from tensorflow_examples.lite.model_maker.core.task import model_spec as ms
 
@@ -79,6 +80,7 @@ def _get_cache_info(cache_dir, data_name, model_spec, is_training):
   return is_cached, tfrecord_file, meta_data_file, file_prefix
 
 
+@mm_export('text_classifier.DataLoader')
 class TextClassifierDataLoader(dataloader.ClassificationDataLoader):
   """DataLoader for text classifier."""
 
@@ -278,6 +280,7 @@ class TextClassifierDataLoader(dataloader.ClassificationDataLoader):
       return lines
 
 
+@mm_export('question_answer.DataLoader')
 class QuestionAnswerDataLoader(dataloader.DataLoader):
   """DataLoader for question answering."""
 

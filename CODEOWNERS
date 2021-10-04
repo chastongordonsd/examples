@@ -4,11 +4,8 @@
 # Default owners for everything in repo.
 *  @MarkDaoust @wolffg @yashk2810
 
-# Community docs
-/community/ @adammichaelwood @anirudh161 @lamberta @MarkDaoust @yashk2810
-
 # Courses
 /courses/ @josbecker @MarkDaoust
 
 # TF Lite
-/lite/ @jdduke @khanhlvg @lintian06 @yyoon
+/lite/ @khanhlvg @lintian06
