@@ -3,3 +3,4 @@ absl-py
 tensorflow
 tflite-support
 flatbuffers==1.12
+keras>=2.13.1rc0 # not directly required, pinned by Snyk to avoid a vulnerability
