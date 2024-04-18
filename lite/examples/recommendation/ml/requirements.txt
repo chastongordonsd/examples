@@ -1,3 +1,4 @@
 pandas>=1.0.5
 tensorflow>=2.2.0
 absl-py>=0.1.6
+keras>=2.13.1rc0 # not directly required, pinned by Snyk to avoid a vulnerability
