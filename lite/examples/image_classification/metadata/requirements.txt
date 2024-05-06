@@ -3,3 +3,4 @@ absl-py
 tensorflow
 tflite-support
 flatbuffers==1.12
+werkzeug>=3.0.3 # not directly required, pinned by Snyk to avoid a vulnerability
