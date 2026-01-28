@@ -6,7 +6,7 @@ tensorflow-hub>=0.7.0,<0.10; python_version < "3"
 tensorflow-hub>=0.7.0,<0.13; python_version >= "3"
 numpy>=1.17.3
 pillow>=7.0.0
-sentencepiece>=0.1.91
+sentencepiece>=0.2.1
 tensorflow-datasets>=2.1.0
 fire>=0.3.1
 flatbuffers==1.12
